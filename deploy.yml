@@ -1,0 +1,276 @@
+# Setting host
+- hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+    image_name: syspass-test-14
+    image_tag: latest
+    replicas: 1
+    database: mysql
+
+  tasks:
+
+  - name: Get existing image hash.
+    shell: docker images -q {{ image_name }}
+    register: image_hash
+    changed_when: false
+
+  - name: Build image if it's not already built.
+    shell: docker build -t {{ image_name }} ../syspass/
+    when: not image_hash.stdout
+
+#  - name: Run the container.
+#    shell: bash -c "docker run -ti -p 443:443 {{ image_name }}"
+
+  - name: Tag.
+    shell: docker tag syspass-test-14 aygullina/syspass-test-14
+
+  - name: Push image to Docker hub.
+    shell: docker push aygullina/"{{ image_name }}:{{ image_tag }}"
+
+
+
+  - name: Create Persistent volume for application.
+    k8s:
+      state: present
+      definition:
+        kind: PersistentVolume
+        apiVersion: v1
+        metadata:
+          name: syspass-pv-volume
+          labels:
+            type: local
+            app: syspass-test-14
+          namespace: default
+        spec:
+          storageClassName: manual
+          capacity:
+            storage: 3Gi
+          accessModes:
+            - ReadWriteMany
+          hostPath:
+            path: "/mnt/data/syspass"
+
+
+
+  - name: Create Persistent volume claim.
+    k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: syspass-pv-claim
+          labels:
+            app: syspass-test-14
+          namespace: default
+        spec:
+          storageClassName: manual
+          accessModes:
+            - ReadWriteMany
+          resources:
+            requests:
+              storage: 3Gi
+
+
+  - name: Create a Deployment for application.
+    k8s:
+      state: present
+      definition:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: syspass-test-14
+          labels:
+            app: syspass-test-14
+          namespace: default
+        spec:
+          replicas: "{{ replicas }}"
+          selector:
+            matchLabels:
+              app: syspass-test-14
+          template:
+            metadata:
+              labels:
+                app: syspass-test-14
+            spec:
+              containers:
+              - name: syspass-test-14
+                image: "aygullina/{{ image_name }}"
+                imagePullPolicy: IfNotPresent
+                env:
+                - name: DB_SERVER
+                  value: 10.233.74.131:3306
+                - name: DB_NAME
+                  value: syspass
+                - name: DB_USER
+                  value: root
+                - name: DB_PASS
+                  value: syspass
+                ports:
+                - containerPort: 443
+                  name: syspass-test-14
+                volumeMounts:
+                - name: syspass-persistent-storage
+                  mountPath: /var/www/app
+              volumes:
+              - name: syspass-persistent-storage
+                persistentVolueClaim:
+                  claimName: syspass-pv-claim  
+
+  - name: Create a Service for application.
+    k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: syspass-test-14
+          labels:
+            app: syspass-test-14
+          namespace: default
+        spec:
+          type: NodePort
+          ports:
+          - port: 443
+            targetPort: 443
+          selector:
+            app: syspass-test-14
+
+
+  - name: Create Ingress for application.
+    k8s:
+      state: present
+      definition:
+        apiVersion: networking.k8s.io/v1beta1
+        kind: Ingress
+        metadata:        
+          name: syspass-test-14-ingress
+          annotations:
+            kubernetes.io/ingress.class: "nginx"
+            nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+            nginx.ingress.kubernetes.io/ssl-passthrough: "True"
+          namespace: default
+        spec:
+          rules:
+          - host: "syspasstestsys.test.ru"
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  serviceName: syspass-test-14
+                  servicePort: 443
+
+#  - name: Create Kustomization for Database.
+#    k8s:
+#      state: present
+#      src: ./mysql
+#      kustomize: true
+
+
+  - name: Create Service for Mysql.
+    k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: syspass-mysql
+          labels:
+            app: syspass-test-14
+          namespace: default
+        spec:
+          ports:
+            - port: 3306
+          selector:
+            app: syspass-test-14
+            tier: mysql
+          clusterIP: None
+
+  - name: Create Persistent volume for Mysql.
+    k8s:
+      state: present
+      definition:
+        kind: PersistentVolume
+        apiVersion: v1
+        metadata:
+          name: mysql-pv-volume
+          labels:
+            type: local
+            app: syspass-test-14
+          namespace: default
+        spec:
+          storageClassName: manual
+          capacity:
+            storage: 3Gi
+          accessModes:
+            - ReadWriteMany
+          hostPath:
+            path: "/mnt/data/mysql"
+
+  - name: Create persistent volume claim for Mysql.
+    k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: mysql-pv-claim
+          labels:
+            app: syspass-test-14
+          namespace: default
+        spec:
+          storageClassName: manual
+          accessModes:
+            - ReadWriteMany
+          resources:
+            requests:
+              storage: 3Gi
+
+  - name: Create Deployment for Mysql.
+    k8s:
+      state: present
+      definition:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: syspass-mysql
+          labels:
+            app: syspass-test-14
+          namespace: default
+        spec:
+          selector:
+            matchLabels:
+              app: syspass-test-14
+          strategy:
+            type: Recreate
+          template:
+            metadata:
+              labels:
+                app: syspass-test-14
+            spec:
+              containers:
+              - image: mysql:5.6
+                name: mysql
+                env:
+                - name: MYSQL_ROOT_PASSWORD
+                  value: syspass 
+                - name: MYSQL_NAME
+                  value: syspass
+                - name: MYSQL_USER
+                  value: root
+                - name: MYSQL_PASSWORD
+                  value: syspass
+                ports:
+                - containerPort: 3306
+                  name: mysql
+                volumeMounts:
+                - name: mysql-persistent-storage
+                  mountPath: /var/lib/mysql
+              volumes:
+              - name: mysql-persistent-storage
+                persistentVolumeClaim:
+                  claimName: mysql-pv-claim
+
